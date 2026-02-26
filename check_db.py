@@ -1,9 +1,8 @@
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, Float, Text, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
-import os
+from config import DATABASE_URL
 
-DATABASE_URL = "postgresql://postgres:postgres@localhost:5432/surveydb"
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(bind=engine)
 Base = declarative_base()

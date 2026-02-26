@@ -1,6 +1,6 @@
 from sqlalchemy import create_engine, inspect
+from config import DATABASE_URL
 
-DATABASE_URL = "postgresql://gamma@localhost:5432/surveydb"
 engine = create_engine(DATABASE_URL)
 
 inspector = inspect(engine)
