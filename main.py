@@ -242,7 +242,7 @@ async def health_check():
     return {"status": "ok"}
 
 
-@app.post("/token", response_model=auth.Token)
+@app.post("/api/token", response_model=auth.Token)
 async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
     user = auth.authenticate_user(auth.fake_users_db, form_data.username, form_data.password)
     if not user:
