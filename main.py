@@ -242,7 +242,7 @@ async def health_check():
     return {"status": "ok"}
 
 
-@app.post("/api/token", response_model=auth.Token)
+@app.post("/token", response_model=auth.Token)
 async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
     user = auth.authenticate_user(auth.fake_users_db, form_data.username, form_data.password)
     if not user:
@@ -258,7 +258,7 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
     return {"access_token": access_token, "token_type": "bearer"}
 
 
-@app.get("/api/responses", response_model=List[SurveyRead])
+@app.get("/responses", response_model=List[SurveyRead])
 def read_surveys(current_user: auth.User = Depends(auth.get_current_user)):
     db: Session = SessionLocal()
     try:
@@ -309,7 +309,7 @@ def create_survey(payload: SurveyCreate):
         db.close()
 
 
-@app.get("/api/wards", response_model=List[WardOut])
+@app.get("/wards", response_model=List[WardOut])
 def get_wards():
     """Get all wards from database"""
     db: Session = SessionLocal()
@@ -320,7 +320,7 @@ def get_wards():
         db.close()
 
 
-@app.post("/api/wards", response_model=WardOut)
+@app.post("/wards", response_model=WardOut)
 def create_ward(payload: WardCreate):
     db: Session = SessionLocal()
     try:
@@ -349,7 +349,7 @@ def get_booths(ward_id: int | None = None):
         db.close()
 
 
-@app.get("/api/booths/{booth_id}", response_model=BoothOut)
+@app.get("/booths/{booth_id}", response_model=BoothOut)
 def get_booth(booth_id: int):
     """Get a specific booth by id"""
     db: Session = SessionLocal()
@@ -362,7 +362,7 @@ def get_booth(booth_id: int):
         db.close()
 
 
-@app.post("/api/booths", response_model=BoothOut)
+@app.post("/booths", response_model=BoothOut)
 def create_booth(payload: BoothCreate):
     """Create a new booth"""
     db: Session = SessionLocal()
@@ -384,7 +384,7 @@ def create_booth(payload: BoothCreate):
         db.close()
 
 
-@app.get("/api/wards/{ward_name}/questions", response_model=List[QuestionOut])
+@app.get("/wards/{ward_name}/questions", response_model=List[QuestionOut])
 def get_ward_questions(ward_name: str):
     db: Session = SessionLocal()
     try:
@@ -396,7 +396,7 @@ def get_ward_questions(ward_name: str):
         db.close()
 
 
-@app.post("/api/wards/{ward_name}/questions")
+@app.post("/wards/{ward_name}/questions")
 def update_ward_questions(ward_name: str, questions: List[QuestionCreate]):
     db: Session = SessionLocal()
     try:
