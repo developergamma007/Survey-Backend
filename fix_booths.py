@@ -42,21 +42,12 @@ def migrate():
     if 'booths' in tables:
         cols = get_columns('booths')
         # Handle booth_add_en/local
-        if 'booth_add_en' not in cols:
-            commands.append("ALTER TABLE booths ADD COLUMN booth_add_en TEXT;")
-        else:
+        if 'booth_add_en' in cols:
             commands.append("ALTER TABLE booths ALTER COLUMN booth_add_en TYPE TEXT;")
-            
-        if 'booth_add_local' not in cols:
-            commands.append("ALTER TABLE booths ADD COLUMN booth_add_local TEXT;")
-        else:
+        if 'booth_add_local' in cols:
             commands.append("ALTER TABLE booths ALTER COLUMN booth_add_local TYPE TEXT;")
         
-        # Ensure ward_code exists if it's missing (for CSV import mapping)
-        if 'ward_code' not in cols:
-            commands.append("ALTER TABLE booths ADD COLUMN ward_code VARCHAR(100);")
-        
-        # Cleanup old columns
+        # Cleanup extra columns
         commands.append("ALTER TABLE booths DROP COLUMN IF EXISTS booth_name_en;")
         commands.append("ALTER TABLE booths DROP COLUMN IF EXISTS booth_name_local;")
         
