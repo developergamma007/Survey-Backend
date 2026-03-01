@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session, relationship, sessionmaker
 
 import auth
 from config import DATABASE_URL
+from fix_booths import migrate as run_migration
 
 engine = create_engine(DATABASE_URL, echo=False, future=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -85,10 +86,25 @@ class Booth(Base):
     id = Column(Integer, primary_key=True, index=True)
     ward_id = Column(Integer, ForeignKey("wards.id"))
     booth_no = Column(String(50), index=True)
-    booth_name_en = Column(String(255))
-    booth_name_local = Column(String(255), nullable=True)
+    booth_name_en = Column(String(500))
+    booth_name_local = Column(String(500), nullable=True)
     
     ward = relationship("Ward")
+
+
+class Voter(Base):
+    __tablename__ = "voters"
+
+    id = Column(Integer, primary_key=True, index=True)
+    ward_code = Column(Text)
+    house = Column(Text)
+    epic = Column(Text, unique=True, index=True)
+    name_en = Column(Text)
+    name_kannada = Column(Text)
+    gender = Column(Text)
+    rel_eng = Column(Text)
+    rel_kannada = Column(Text)
+    rel_type = Column(Text)
 
 
 class SurveyCreate(BaseModel):
@@ -231,6 +247,7 @@ app.add_middleware(
 @app.on_event("startup")
 def on_startup() -> None:
     try:
+        run_migration()
         init_db()
     except Exception as e:
         print(f"Warning: Could not initialize database: {e}")
