@@ -23,32 +23,32 @@ class SurveyResponse(Base):
     __tablename__ = "survey_responses"
 
     id = Column(Integer, primary_key=True, index=True)
-    assembly = Column(String(255))
-    gba_ward = Column(String(255))
-    polling_station_name = Column(String(255))
-    polling_station_number = Column(String(50))
-    surveyor_name = Column(String(255))
-    surveyor_mobile = Column(String(50))
+    assembly = Column(Text, nullable=True)
+    gba_ward = Column(Text, nullable=True)
+    polling_station_name = Column(Text, nullable=True)
+    polling_station_number = Column(String(100), nullable=True)
+    surveyor_name = Column(Text, nullable=True)
+    surveyor_mobile = Column(String(100), nullable=True)
 
-    interviewer_name = Column(String(255))
-    interviewer_age = Column(String(10))
-    interviewer_gender = Column(String(50))
-    interviewer_caste = Column(String(100))
-    interviewer_community = Column(String(100))
-    interviewer_mobile = Column(String(50))
-    interviewer_education = Column(String(100))
-    interviewer_work = Column(String(100))
+    interviewer_name = Column(Text, nullable=True)
+    interviewer_age = Column(String(50), nullable=True)
+    interviewer_gender = Column(String(100), nullable=True)
+    interviewer_caste = Column(Text, nullable=True)
+    interviewer_community = Column(Text, nullable=True)
+    interviewer_mobile = Column(String(100), nullable=True)
+    interviewer_education = Column(Text, nullable=True)
+    interviewer_work = Column(Text, nullable=True)
 
-    q1 = Column(String(50))
-    q2 = Column(String(50))
-    q3 = Column(String(50))
-    q4 = Column(String(50))
+    q1 = Column(Text, nullable=True)
+    q2 = Column(Text, nullable=True)
+    q3 = Column(Text, nullable=True)
+    q4 = Column(Text, nullable=True)
 
-    candidate_priority1 = Column(String(255))
-    candidate_priority2 = Column(String(255))
-    candidate_priority3 = Column(String(255))
-    candidate_priority4 = Column(String(255))
-    candidate_priority5 = Column(String(255))
+    candidate_priority1 = Column(Text, nullable=True)
+    candidate_priority2 = Column(Text, nullable=True)
+    candidate_priority3 = Column(Text, nullable=True)
+    candidate_priority4 = Column(Text, nullable=True)
+    candidate_priority5 = Column(Text, nullable=True)
 
     latitude = Column(Float, nullable=True)
     longitude = Column(Float, nullable=True)
@@ -63,8 +63,9 @@ class Ward(Base):
     __tablename__ = "wards"
 
     id = Column(Integer, primary_key=True, index=True)
-    ward_name_en = Column(String(255), unique=True, index=True)
-    ward_name_local = Column(String(255), nullable=True)
+    ward_code = Column(String(100), unique=True, index=True, nullable=True)
+    ward_name_en = Column(Text, unique=True, index=True)
+    ward_name_local = Column(Text, nullable=True)
     
     questions = relationship("Question", back_populates="ward", cascade="all, delete-orphan")
 
@@ -85,9 +86,9 @@ class Booth(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     ward_id = Column(Integer, ForeignKey("wards.id"))
-    booth_no = Column(String(50), index=True)
-    booth_name_en = Column(String(500))
-    booth_name_local = Column(String(500), nullable=True)
+    booth_no = Column(String(100), index=True)
+    booth_add_en = Column(Text)
+    booth_add_local = Column(Text, nullable=True)
     
     ward = relationship("Ward")
 
@@ -154,8 +155,8 @@ class WardCreate(BaseModel):
 class BoothCreate(BaseModel):
     ward_id: int
     booth_no: str
-    booth_name_en: str
-    booth_name_local: str | None = None
+    booth_add_en: str
+    booth_add_local: str | None = None
 
 
 class QuestionOut(BaseModel):
@@ -179,8 +180,8 @@ class BoothOut(BaseModel):
     id: int
     ward_id: int
     booth_no: str
-    booth_name_en: str
-    booth_name_local: str | None
+    booth_add_en: str
+    booth_add_local: str | None
 
     class Config:
         from_attributes = True
@@ -387,8 +388,8 @@ def create_booth(payload: BoothCreate):
         booth = Booth(
             ward_id=payload.ward_id,
             booth_no=payload.booth_no,
-            booth_name_en=payload.booth_name_en,
-            booth_name_local=payload.booth_name_local,
+            booth_add_en=payload.booth_add_en,
+            booth_add_local=payload.booth_add_local,
         )
         db.add(booth)
         db.commit()

@@ -5,56 +5,71 @@ engine = create_engine(DATABASE_URL)
 
 def migrate():
     with engine.connect() as conn:
-        # Check if booths table exists
-        booths_exists = conn.execute(text("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'booths');")).scalar()
-        # Check if voters table exists
-        voters_exists = conn.execute(text("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'voters');")).scalar()
+        tables = [row[0] for row in conn.execute(text("SELECT table_name FROM information_schema.tables WHERE table_schema='public';"))]
 
     commands = []
-    
-    if booths_exists:
-        commands.extend([
-            # 1. Add id column to booths if it doesn't exist
-            "ALTER TABLE booths ADD COLUMN IF NOT EXISTS id SERIAL PRIMARY KEY;",
-            
-            # 2. Add ward_id column to booths if it doesn't exist
-            "ALTER TABLE booths ADD COLUMN IF NOT EXISTS ward_id INTEGER REFERENCES wards(id);",
-            
-            # 3. Handle booth_add_en -> booth_name_en rename and size
-            "ALTER TABLE booths ALTER COLUMN booth_add_en TYPE VARCHAR(500);" if "booth_add_en" in get_columns("booths") else "",
-            "ALTER TABLE booths RENAME COLUMN booth_add_en TO booth_name_en;" if "booth_add_en" in get_columns("booths") else "",
-            
-            # 4. Handle booth_add_local -> booth_name_local rename and size
-            "ALTER TABLE booths ALTER COLUMN booth_add_local TYPE VARCHAR(500);" if "booth_add_local" in get_columns("booths") else "",
-            "ALTER TABLE booths RENAME COLUMN booth_add_local TO booth_name_local;" if "booth_add_local" in get_columns("booths") else "",
-            
-            # 5. Ensure booth_name_* already in place are 500
-            "ALTER TABLE booths ALTER COLUMN booth_name_en TYPE VARCHAR(500);" if "booth_name_en" in get_columns("booths") else "",
-            "ALTER TABLE booths ALTER COLUMN booth_name_local TYPE VARCHAR(500);" if "booth_name_local" in get_columns("booths") else "",
-            
-            # 6. Update ward_id based on ward_code
-            "UPDATE booths b SET ward_id = w.id FROM wards w WHERE b.ward_code = w.ward_code AND b.ward_id IS NULL;" if "ward_code" in get_columns("booths") else "",
-            
-            # 7. Ensure booth_no is compatible with String(50)
-            "ALTER TABLE booths ALTER COLUMN booth_no TYPE VARCHAR(50);" 
-        ])
 
-    if voters_exists:
-        voter_cols = get_columns("voters")
-        voter_alterations = [
-            ("ward_code", "TEXT"),
-            ("house", "TEXT"),
-            ("epic", "TEXT"),
-            ("name_en", "TEXT"),
-            ("name_kannada", "TEXT"),
-            ("gender", "TEXT"),
-            ("rel_eng", "TEXT"),
-            ("rel_kannada", "TEXT"),
-            ("rel_type", "TEXT")
+    # 1. Survey Responses Migrations
+    if 'survey_responses' in tables:
+        cols = get_columns('survey_responses')
+        text_cols = [
+            'assembly', 'gba_ward', 'polling_station_name', 'surveyor_name',
+            'interviewer_name', 'interviewer_caste', 'interviewer_community',
+            'interviewer_education', 'interviewer_work', 'q1', 'q2', 'q3', 'q4',
+            'candidate_priority1', 'candidate_priority2', 'candidate_priority3',
+            'candidate_priority4', 'candidate_priority5'
         ]
-        for col, new_type in voter_alterations:
-            if col in voter_cols:
-                commands.append(f"ALTER TABLE voters ALTER COLUMN {col} TYPE {new_type};")
+        for col in text_cols:
+            if col in cols:
+                commands.append(f"ALTER TABLE survey_responses ALTER COLUMN {col} TYPE TEXT;")
+        
+        # Ensure mobile/number/age fields are at least 100
+        for col in ['polling_station_number', 'surveyor_mobile', 'interviewer_mobile']:
+            if col in cols:
+                commands.append(f"ALTER TABLE survey_responses ALTER COLUMN {col} TYPE VARCHAR(100);")
+        if 'interviewer_age' in cols:
+            commands.append("ALTER TABLE survey_responses ALTER COLUMN interviewer_age TYPE VARCHAR(50);")
+
+    # 2. Wards Migrations
+    if 'wards' in tables:
+        cols = get_columns('wards')
+        if 'ward_code' not in cols:
+            commands.append("ALTER TABLE wards ADD COLUMN ward_code VARCHAR(100) UNIQUE;")
+        commands.append("ALTER TABLE wards ALTER COLUMN ward_name_en TYPE TEXT;")
+        commands.append("ALTER TABLE wards ALTER COLUMN ward_name_local TYPE TEXT;")
+
+    # 3. Booths Migrations
+    if 'booths' in tables:
+        cols = get_columns('booths')
+        # Handle booth_add_en/local
+        if 'booth_add_en' in cols:
+            commands.append("ALTER TABLE booths ALTER COLUMN booth_add_en TYPE TEXT;")
+        if 'booth_add_local' in cols:
+            commands.append("ALTER TABLE booths ALTER COLUMN booth_add_local TYPE TEXT;")
+        
+        # Cleanup extra columns
+        commands.append("ALTER TABLE booths DROP COLUMN IF EXISTS booth_name_en;")
+        commands.append("ALTER TABLE booths DROP COLUMN IF EXISTS booth_name_local;")
+        
+        # Requirements
+        commands.append("ALTER TABLE booths ADD COLUMN IF NOT EXISTS id SERIAL PRIMARY KEY;")
+        commands.append("ALTER TABLE booths ADD COLUMN IF NOT EXISTS ward_id INTEGER REFERENCES wards(id);")
+        
+        if 'ward_code' in cols:
+            commands.append("UPDATE booths b SET ward_id = w.id FROM wards w WHERE b.ward_code = w.ward_code AND b.ward_id IS NULL;")
+        
+        commands.append("ALTER TABLE booths ALTER COLUMN booth_no TYPE VARCHAR(100);")
+
+    # 4. Voters Migrations
+    if 'voters' in tables:
+        cols = get_columns('voters')
+        voter_text_cols = [
+            "ward_code", "house", "epic", "name_en", "name_kannada", 
+            "gender", "rel_eng", "rel_kannada", "rel_type"
+        ]
+        for col in voter_text_cols:
+            if col in cols:
+                commands.append(f"ALTER TABLE voters ALTER COLUMN {col} TYPE TEXT;")
 
     if not commands:
         return
