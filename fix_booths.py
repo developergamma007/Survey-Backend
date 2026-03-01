@@ -65,7 +65,7 @@ def migrate():
         cols = get_columns('voters')
         voter_text_cols = [
             "ward_code", "house", "epic", "name_en", "name_kannada", 
-            "gender", "rel_eng", "rel_kannada", "rel_type"
+            "gender", "rel_eng", "rel_kannada", "rel_type", "mobile"
         ]
         for col in voter_text_cols:
             if col in cols:

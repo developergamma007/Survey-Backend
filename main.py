@@ -106,6 +106,7 @@ class Voter(Base):
     rel_eng = Column(Text)
     rel_kannada = Column(Text)
     rel_type = Column(Text)
+    mobile = Column(Text, nullable=True)  # Mobile field that exists in database
 
 
 class SurveyCreate(BaseModel):
@@ -171,6 +172,16 @@ class QuestionOut(BaseModel):
 class WardOut(BaseModel):
     id: int
     ward_name_en: str | None = None
+
+    class Config:
+        from_attributes = True
+
+
+class VoterSearch(BaseModel):
+    name_en: str
+    epic: str | None = None
+    house: str | None = None
+    mobile: str | None = None  # Mobile field as string
 
     class Config:
         from_attributes = True
@@ -437,5 +448,15 @@ def update_ward_questions(ward_name: str, questions: List[QuestionCreate]):
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        db.close()
+@app.get("/api/voters/search", response_model=List[VoterSearch])
+def search_voters(q: str):
+    """Search voters by name_en for suggestions"""
+    db: Session = SessionLocal()
+    try:
+        # Use case-insensitive partial match
+        results = db.query(Voter).filter(Voter.name_en.ilike(f"%{q}%")).limit(10).all()
+        return results
     finally:
         db.close()
