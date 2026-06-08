@@ -6,12 +6,13 @@ engine = create_engine(DATABASE_URL)
 def migrate():
     with engine.connect() as conn:
         tables = [row[0] for row in conn.execute(text("SELECT table_name FROM information_schema.tables WHERE table_schema='public';"))]
+        survey_tables = [row[0] for row in conn.execute(text("SELECT table_name FROM information_schema.tables WHERE table_schema='survey';"))]
 
     commands = []
 
     # 1. Survey Responses Migrations
-    if 'survey_responses' in tables:
-        cols = get_columns('survey_responses')
+    if 'survey_responses' in survey_tables:
+        cols = get_columns('survey_responses', schema='survey')
         text_cols = [
             'assembly', 'gba_ward', 'polling_station_name', 'surveyor_name',
             'interviewer_name', 'interviewer_caste', 'interviewer_community',
@@ -21,14 +22,14 @@ def migrate():
         ]
         for col in text_cols:
             if col in cols:
-                commands.append(f"ALTER TABLE survey_responses ALTER COLUMN {col} TYPE TEXT;")
+                commands.append(f"ALTER TABLE survey.survey_responses ALTER COLUMN {col} TYPE TEXT;")
         
         # Ensure mobile/number/age fields are at least 100
         for col in ['polling_station_number', 'surveyor_mobile', 'interviewer_mobile']:
             if col in cols:
-                commands.append(f"ALTER TABLE survey_responses ALTER COLUMN {col} TYPE VARCHAR(100);")
+                commands.append(f"ALTER TABLE survey.survey_responses ALTER COLUMN {col} TYPE VARCHAR(100);")
         if 'interviewer_age' in cols:
-            commands.append("ALTER TABLE survey_responses ALTER COLUMN interviewer_age TYPE VARCHAR(50);")
+            commands.append("ALTER TABLE survey.survey_responses ALTER COLUMN interviewer_age TYPE VARCHAR(50);")
 
     # 2. Wards Migrations
     if 'wards' in tables:
@@ -85,9 +86,15 @@ def migrate():
                 print(f"Error executing {cmd}: {e}")
                 conn.rollback()
 
-def get_columns(table_name):
+def get_columns(table_name, schema="public"):
     with engine.connect() as conn:
-        result = conn.execute(text(f"SELECT column_name FROM information_schema.columns WHERE table_name = '{table_name}';"))
+        result = conn.execute(
+            text(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = :schema AND table_name = :table_name;"
+            ),
+            {"schema": schema, "table_name": table_name},
+        )
         return [row[0] for row in result]
 
 if __name__ == "__main__":

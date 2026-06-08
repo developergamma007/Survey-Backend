@@ -9,6 +9,7 @@ Base = declarative_base()
 
 class SurveyResponse(Base):
     __tablename__ = "survey_responses"
+    __table_args__ = {"schema": "survey"}
     id = Column(Integer, primary_key=True)
     interviewer_name = Column(String)
 

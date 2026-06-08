@@ -1,11 +1,11 @@
 from datetime import datetime, timedelta
-from typing import Any, List
+from typing import List
 
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel
-from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, String, Text, create_engine, text
+from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, String, Text, create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import Session, relationship, sessionmaker
 
@@ -21,6 +21,7 @@ Base = declarative_base()
 
 class SurveyResponse(Base):
     __tablename__ = "survey_responses"
+    __table_args__ = {"schema": "survey"}
 
     id = Column(Integer, primary_key=True, index=True)
     assembly = Column(Text, nullable=True)
@@ -67,18 +68,29 @@ class Ward(Base):
     ward_name_en = Column(Text, unique=True, index=True)
     ward_name_local = Column(Text, nullable=True)
     
-    questions = relationship("Question", back_populates="ward", cascade="all, delete-orphan")
+    questions = relationship(
+        "Question",
+        back_populates="ward",
+        cascade="all, delete-orphan",
+        foreign_keys="Question.ward_id",
+        primaryjoin="Ward.id == Question.ward_id",
+    )
 
 
 class Question(Base):
-    __tablename__ = "questions"
+    __tablename__ = "survey_questions"
+    __table_args__ = {"schema": "survey"}
 
     id = Column(Integer, primary_key=True, index=True)
     ward_id = Column(Integer, ForeignKey("wards.id"))
     text = Column(Text)
     options = Column(Text)  # Store as comma-separated or JSON string
-    
-    ward = relationship("Ward", back_populates="questions")
+
+    ward = relationship(
+        "Ward",
+        back_populates="questions",
+        foreign_keys=[ward_id],
+    )
 
 
 class Booth(Base):
@@ -177,27 +189,20 @@ class WardOut(BaseModel):
 
 
 class VoterSearch(BaseModel):
-    id: int | None = None
-    ward_code: str | None = None
-    house: str | None = None
+    name_en: str
     epic: str | None = None
-    name_en: str | None = None
-    name_kannada: str | None = None
-    gender: str | None = None
-    rel_eng: str | None = None
-    rel_kannada: str | None = None
-    rel_type: str | None = None
+    house: str | None = None
 
     class Config:
         from_attributes = True
 
 
 class BoothOut(BaseModel):
-    id: int | None = None
-    ward_id: int | None = None
-    booth_no: str | None = None
-    booth_add_en: str | None = None
-    booth_add_local: str | None = None
+    id: int
+    ward_id: int
+    booth_no: str
+    booth_add_en: str
+    booth_add_local: str | None
 
     class Config:
         from_attributes = True
@@ -250,31 +255,6 @@ def init_db() -> None:
     Base.metadata.create_all(bind=engine)
 
 
-def _table_columns(db: Session, table_name: str) -> list[str]:
-    result = db.execute(
-        text(
-            """
-            SELECT column_name
-            FROM information_schema.columns
-            WHERE table_schema='public' AND table_name = :table_name
-            ORDER BY ordinal_position
-            """
-        ),
-        {"table_name": table_name},
-    )
-    return [row[0] for row in result]
-
-
-def _normalize_booth_row(row: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "id": row.get("id"),
-        "ward_id": row.get("ward_id"),
-        "booth_no": row.get("booth_no"),
-        "booth_add_en": row.get("booth_add_en") or row.get("booth_add") or row.get("booth_name_en"),
-        "booth_add_local": row.get("booth_add_local") or row.get("booth_name_local"),
-    }
-
-
 app = FastAPI()
 
 app.add_middleware(
@@ -301,8 +281,7 @@ async def health_check():
     return {"status": "ok"}
 
 
-@app.post("/api/token", response_model=auth.Token)
-async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
+async def _issue_access_token(form_data: OAuth2PasswordRequestForm) -> auth.Token:
     user = auth.authenticate_user(auth.fake_users_db, form_data.username, form_data.password)
     if not user:
         raise HTTPException(
@@ -315,6 +294,12 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
         data={"sub": user.username}, expires_delta=access_token_expires
     )
     return {"access_token": access_token, "token_type": "bearer"}
+
+
+@app.post("/token", response_model=auth.Token)
+@app.post("/api/token", response_model=auth.Token)
+async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
+    return await _issue_access_token(form_data)
 
 
 @app.get("/api/responses", response_model=List[SurveyRead])
@@ -389,8 +374,6 @@ def create_ward(payload: WardCreate):
         db.refresh(ward)
         return ward
     except Exception as e:
-        if isinstance(e, HTTPException):
-            raise
         db.rollback()
         raise HTTPException(status_code=400, detail=str(e))
     finally:
@@ -402,19 +385,10 @@ def get_booths(ward_id: int | None = None):
     """Get all booths with booth_no, optionally filtered by ward_id"""
     db: Session = SessionLocal()
     try:
-        booth_columns = set(_table_columns(db, "booths"))
-        if not booth_columns:
-            return []
-
-        select_cols = ", ".join(f'"{col}"' for col in booth_columns)
-        sql = f"SELECT {select_cols} FROM booths"
-        params: dict[str, Any] = {}
-        if ward_id is not None and "ward_id" in booth_columns:
-            sql += ' WHERE "ward_id" = :ward_id'
-            params["ward_id"] = ward_id
-
-        rows = db.execute(text(sql), params).mappings().all()
-        return [_normalize_booth_row(dict(row)) for row in rows]
+        query = db.query(Booth)
+        if ward_id:
+            query = query.filter(Booth.ward_id == ward_id)
+        return query.all()
     finally:
         db.close()
 
@@ -424,18 +398,10 @@ def get_booth(booth_id: int):
     """Get a specific booth by id"""
     db: Session = SessionLocal()
     try:
-        booth_columns = set(_table_columns(db, "booths"))
-        if "id" not in booth_columns:
-            raise HTTPException(status_code=404, detail="Booth not found")
-
-        select_cols = ", ".join(f'"{col}"' for col in booth_columns)
-        booth = db.execute(
-            text(f'SELECT {select_cols} FROM booths WHERE "id" = :booth_id'),
-            {"booth_id": booth_id},
-        ).mappings().first()
+        booth = db.query(Booth).filter(Booth.id == booth_id).first()
         if not booth:
             raise HTTPException(status_code=404, detail="Booth not found")
-        return _normalize_booth_row(dict(booth))
+        return booth
     finally:
         db.close()
 
@@ -445,41 +411,16 @@ def create_booth(payload: BoothCreate):
     """Create a new booth"""
     db: Session = SessionLocal()
     try:
-        booth_columns = set(_table_columns(db, "booths"))
-        if not booth_columns:
-            raise HTTPException(status_code=400, detail="booths table not found")
-
-        values: dict[str, Any] = {}
-        if "ward_id" in booth_columns:
-            values["ward_id"] = payload.ward_id
-        if "booth_no" in booth_columns:
-            values["booth_no"] = payload.booth_no
-
-        if "booth_add_en" in booth_columns:
-            values["booth_add_en"] = payload.booth_add_en
-        elif "booth_add" in booth_columns:
-            values["booth_add"] = payload.booth_add_en
-        elif "booth_name_en" in booth_columns:
-            values["booth_name_en"] = payload.booth_add_en
-
-        if "booth_add_local" in booth_columns:
-            values["booth_add_local"] = payload.booth_add_local
-        elif "booth_name_local" in booth_columns:
-            values["booth_name_local"] = payload.booth_add_local
-
-        if not values:
-            raise HTTPException(status_code=400, detail="No compatible columns found in booths table")
-
-        cols_sql = ", ".join(f'"{col}"' for col in values)
-        vals_sql = ", ".join(f":{col}" for col in values)
-        inserted = db.execute(
-            text(f"INSERT INTO booths ({cols_sql}) VALUES ({vals_sql}) RETURNING *"),
-            values,
-        ).mappings().first()
+        booth = Booth(
+            ward_id=payload.ward_id,
+            booth_no=payload.booth_no,
+            booth_add_en=payload.booth_add_en,
+            booth_add_local=payload.booth_add_local,
+        )
+        db.add(booth)
         db.commit()
-        if not inserted:
-            raise HTTPException(status_code=500, detail="Failed to create booth")
-        return _normalize_booth_row(dict(inserted))
+        db.refresh(booth)
+        return booth
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=400, detail=str(e))
@@ -524,57 +465,13 @@ def update_ward_questions(ward_name: str, questions: List[QuestionCreate]):
         raise HTTPException(status_code=400, detail=str(e))
     finally:
         db.close()
-@app.get("/api/voters/search", response_model=List[dict[str, Any]])
-def search_voters(
-    q: str,
-    ward_code: str | None = None,
-    ward_no: str | None = None,
-    ward_id: int | None = None,
-):
-    """Search voters by name/epic filtered by ward code/no or ward id."""
+@app.get("/api/voters/search", response_model=List[VoterSearch])
+def search_voters(q: str):
+    """Search voters by name_en for suggestions"""
     db: Session = SessionLocal()
     try:
-        voter_columns = _table_columns(db, "voters")
-        if not voter_columns:
-            return []
-        searchable_columns = [col for col in ["name_en", "name_kannada", "epic"] if col in voter_columns]
-        if not searchable_columns:
-            raise HTTPException(status_code=500, detail="No searchable voter columns found")
-
-        select_cols = ", ".join(f'"{col}"' for col in voter_columns)
-        search_clause = " OR ".join(f'"{col}" ILIKE :pattern' for col in searchable_columns)
-        sql = f"SELECT {select_cols} FROM voters WHERE ({search_clause})"
-        params: dict[str, Any] = {"pattern": f"%{q}%"}
-
-        requested_ward_text = (ward_code or ward_no or "").strip()
-
-        # Direct ward_id filtering if voters table has numeric ward_id.
-        if ward_id is not None and "ward_id" in voter_columns:
-            sql += ' AND "ward_id" = :ward_id'
-            params["ward_id"] = ward_id
-        else:
-            # Resolve ward_id -> ward_code when possible.
-            if not requested_ward_text and ward_id is not None:
-                ward_columns = set(_table_columns(db, "wards"))
-                if "id" in ward_columns and "ward_code" in ward_columns:
-                    ward_code_value = db.execute(
-                        text('SELECT "ward_code" FROM wards WHERE "id" = :ward_id'),
-                        {"ward_id": ward_id},
-                    ).scalar()
-                    if ward_code_value:
-                        requested_ward_text = str(ward_code_value).strip()
-
-            # Text ward filter against common voter column names.
-            if requested_ward_text:
-                if "ward_code" in voter_columns:
-                    sql += ' AND "ward_code" = :ward_text'
-                    params["ward_text"] = requested_ward_text
-                elif "ward_no" in voter_columns:
-                    sql += ' AND "ward_no" = :ward_text'
-                    params["ward_text"] = requested_ward_text
-
-        sql += " LIMIT 10"
-        results = db.execute(text(sql), params).mappings().all()
-        return [dict(row) for row in results]
+        # Use case-insensitive partial match
+        results = db.query(Voter).filter(Voter.name_en.ilike(f"%{q}%")).limit(10).all()
+        return results
     finally:
         db.close()
