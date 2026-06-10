@@ -21,6 +21,16 @@ ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 720  # 12 hours
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+oauth2_scheme_optional = OAuth2PasswordBearer(tokenUrl="token", auto_error=False)
+
+SUBMIT_BLOCKED_USERNAMES = frozenset({"admin", "admin@iswot.io"})
+
+
+def is_submit_blocked_username(username: str | None) -> bool:
+    if not username:
+        return False
+    normalized = username.strip().lower()
+    return normalized in SUBMIT_BLOCKED_USERNAMES or normalized.startswith("admin@iswot")
 
 auth_engine = create_engine(DATABASE_URL, echo=False, future=True)
 AuthSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=auth_engine)
@@ -81,6 +91,9 @@ def get_user_from_db(username: str):
             hashed_password=row.hashed_password,
             disabled=row.disabled,
         )
+    except Exception as e:
+        print(f"[auth] survey_users lookup failed, using fallback users: {e}")
+        return None
     finally:
         db.close()
 
@@ -112,6 +125,22 @@ def create_access_token(data: dict, expires_delta: Union[timedelta, None] = None
     to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
+
+async def get_optional_user(token: str | None = Depends(oauth2_scheme_optional)):
+    if not token:
+        return None
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        if username is None:
+            return None
+        user = get_user(fake_users_db, username=username)
+        if user is None or user.disabled:
+            return None
+        return user
+    except JWTError:
+        return None
+
 
 async def get_current_user(token: str = Depends(oauth2_scheme)):
     credentials_exception = HTTPException(

@@ -30,6 +30,8 @@ def migrate():
                 commands.append(f"ALTER TABLE survey.survey_responses ALTER COLUMN {col} TYPE VARCHAR(100);")
         if 'interviewer_age' in cols:
             commands.append("ALTER TABLE survey.survey_responses ALTER COLUMN interviewer_age TYPE VARCHAR(50);")
+        if 'audio_url' not in cols:
+            commands.append("ALTER TABLE survey.survey_responses ADD COLUMN IF NOT EXISTS audio_url TEXT;")
 
     # 2. Wards Migrations
     if 'wards' in tables:

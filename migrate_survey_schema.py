@@ -43,6 +43,8 @@ VALUES
     ('admin', '$2b$12$y5THdVd56K2gvIRMlwC5sOK.Am.HGbthUp0L1aPWnzcIP7c6HLT6u', FALSE),
     ('admin@iswot.io', '$2b$12$MX9SY/SK5YbA70fZXEy40O0HZaq6iYroJ7jakYWKlmSOi8dnifYPu', FALSE)
 ON CONFLICT (username) DO NOTHING;
+
+ALTER TABLE survey.survey_responses ADD COLUMN IF NOT EXISTS audio_url TEXT;
 """
 
 

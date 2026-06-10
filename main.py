@@ -1,3 +1,4 @@
+import os
 from datetime import datetime, timedelta
 from typing import List
 
@@ -5,11 +6,12 @@ from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel
-from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, String, Text, create_engine
+from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, String, Text, create_engine, func, or_, text
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import Session, relationship, sessionmaker
+from sqlalchemy.orm import Session, defer, relationship, sessionmaker
 
 import auth
+import s3_storage
 from config import DATABASE_URL
 from fix_booths import migrate as run_migration
 
@@ -55,9 +57,18 @@ class SurveyResponse(Base):
     longitude = Column(Float, nullable=True)
 
     audio_base64 = Column(Text, nullable=True)
+    audio_url = Column(Text, nullable=True)  # S3 object key
     dynamic_answers = Column(Text, nullable=True)  # Store as JSON string
 
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class Assembly(Base):
+    __tablename__ = "assembly"
+
+    assembly_no = Column(Integer, primary_key=True, index=True)
+    assembly_name_en = Column(Text, nullable=True)
+    assembly_name_local = Column(Text, nullable=True)
 
 
 class Ward(Base):
@@ -67,6 +78,7 @@ class Ward(Base):
     ward_code = Column(String(100), unique=True, index=True, nullable=True)
     ward_name_en = Column(Text, unique=True, index=True)
     ward_name_local = Column(Text, nullable=True)
+    assembly_no = Column(Integer, nullable=True, index=True)
     
     questions = relationship(
         "Question",
@@ -157,7 +169,7 @@ class SurveyCreate(BaseModel):
 
 class QuestionCreate(BaseModel):
     text: str
-    options: List[str]
+    options: str
 
 
 class WardCreate(BaseModel):
@@ -180,9 +192,20 @@ class QuestionOut(BaseModel):
         from_attributes = True
 
 
+class AssemblyOut(BaseModel):
+    assembly_no: int
+    assembly_name_en: str | None = None
+    assembly_name_local: str | None = None
+
+    class Config:
+        from_attributes = True
+
+
 class WardOut(BaseModel):
     id: int
     ward_name_en: str | None = None
+    ward_name_local: str | None = None
+    assembly_no: int | None = None
 
     class Config:
         from_attributes = True
@@ -216,7 +239,7 @@ class SurveyOut(BaseModel):
         from_attributes = True
 
 
-class SurveyRead(BaseModel):
+class SurveyListRead(BaseModel):
     id: int
     assembly: str | None
     gba_ward: str | None
@@ -243,12 +266,18 @@ class SurveyRead(BaseModel):
     candidate_priority5: str | None
     latitude: float | None
     longitude: float | None
-    audio_base64: str | None
+    audio_url: str | None = None
+    has_audio: bool = False
     dynamic_answers: str | None
     created_at: datetime
 
     class Config:
         from_attributes = True
+
+
+class AudioPlaybackOut(BaseModel):
+    url: str
+    source: str
 
 
 def init_db() -> None:
@@ -266,8 +295,27 @@ app.add_middleware(
 )
 
 
+def _db_startup_enabled() -> bool:
+    return os.getenv("RUN_DB_MIGRATIONS", "true").lower() not in ("0", "false", "no")
+
+
+def _ensure_audio_url_column() -> None:
+    """Idempotent schema patch — safe even when RUN_DB_MIGRATIONS=false."""
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text("ALTER TABLE survey.survey_responses ADD COLUMN IF NOT EXISTS audio_url TEXT;")
+            )
+    except Exception as e:
+        print(f"Warning: Could not ensure audio_url column: {e}")
+
+
 @app.on_event("startup")
 def on_startup() -> None:
+    _ensure_audio_url_column()
+    if not _db_startup_enabled():
+        print("[startup] RUN_DB_MIGRATIONS=false — using existing remote schema (no local migrate/create).")
+        return
     try:
         run_migration()
         init_db()
@@ -302,18 +350,121 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
     return await _issue_access_token(form_data)
 
 
-@app.get("/api/responses", response_model=List[SurveyRead])
+def _survey_has_audio_expr():
+    return or_(
+        SurveyResponse.audio_url.isnot(None),
+        func.coalesce(func.length(SurveyResponse.audio_base64), 0) > 50,
+    )
+
+
+def _to_survey_list_item(survey: SurveyResponse, has_audio: bool) -> SurveyListRead:
+    return SurveyListRead(
+        id=survey.id,
+        assembly=survey.assembly,
+        gba_ward=survey.gba_ward,
+        polling_station_name=survey.polling_station_name,
+        polling_station_number=survey.polling_station_number,
+        surveyor_name=survey.surveyor_name,
+        surveyor_mobile=survey.surveyor_mobile,
+        interviewer_name=survey.interviewer_name,
+        interviewer_age=survey.interviewer_age,
+        interviewer_gender=survey.interviewer_gender,
+        interviewer_caste=survey.interviewer_caste,
+        interviewer_community=survey.interviewer_community,
+        interviewer_mobile=survey.interviewer_mobile,
+        interviewer_education=survey.interviewer_education,
+        interviewer_work=survey.interviewer_work,
+        q1=survey.q1,
+        q2=survey.q2,
+        q3=survey.q3,
+        q4=survey.q4,
+        candidate_priority1=survey.candidate_priority1,
+        candidate_priority2=survey.candidate_priority2,
+        candidate_priority3=survey.candidate_priority3,
+        candidate_priority4=survey.candidate_priority4,
+        candidate_priority5=survey.candidate_priority5,
+        latitude=survey.latitude,
+        longitude=survey.longitude,
+        audio_url=survey.audio_url,
+        has_audio=has_audio,
+        dynamic_answers=survey.dynamic_answers,
+        created_at=survey.created_at,
+    )
+
+
+@app.get("/api/responses", response_model=List[SurveyListRead])
 def read_surveys(current_user: auth.User = Depends(auth.get_current_user)):
     db: Session = SessionLocal()
     try:
-        surveys = db.query(SurveyResponse).order_by(SurveyResponse.created_at.desc()).all()
-        return surveys
+        rows = (
+            db.query(SurveyResponse, _survey_has_audio_expr().label("has_audio"))
+            .options(defer(SurveyResponse.audio_base64))
+            .order_by(SurveyResponse.created_at.desc())
+            .all()
+        )
+        return [_to_survey_list_item(survey, bool(has_audio)) for survey, has_audio in rows]
+    finally:
+        db.close()
+
+
+@app.get("/api/responses/{survey_id}/audio", response_model=AudioPlaybackOut)
+def get_response_audio(
+    survey_id: int,
+    current_user: auth.User = Depends(auth.get_current_user),
+):
+    db: Session = SessionLocal()
+    try:
+        survey = db.query(SurveyResponse).filter(SurveyResponse.id == survey_id).first()
+        if not survey:
+            raise HTTPException(status_code=404, detail="Survey not found")
+
+        if survey.audio_url:
+            try:
+                return AudioPlaybackOut(
+                    url=s3_storage.get_playback_url(survey.audio_url),
+                    source="s3",
+                )
+            except Exception as exc:
+                raise HTTPException(status_code=500, detail=f"Could not generate audio URL: {exc}") from exc
+
+        if survey.audio_base64 and len(survey.audio_base64.strip()) > 50:
+            return AudioPlaybackOut(
+                url=s3_storage.to_data_url(survey.audio_base64),
+                source="legacy",
+            )
+
+        raise HTTPException(status_code=404, detail="No audio for this survey")
     finally:
         db.close()
 
 
 @app.post("/surveys", response_model=SurveyOut)
-def create_survey(payload: SurveyCreate):
+async def create_survey(
+    payload: SurveyCreate,
+    current_user: auth.User | None = Depends(auth.get_optional_user),
+):
+    if current_user and auth.is_submit_blocked_username(current_user.username):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin accounts cannot submit survey responses.",
+        )
+
+    audio_url: str | None = None
+    audio_base64: str | None = payload.audio_base64
+
+    if payload.audio_base64 and payload.audio_base64.strip():
+        if s3_storage.is_configured():
+            try:
+                audio_url = s3_storage.upload_survey_audio(payload.audio_base64)
+                audio_base64 = None
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Failed to upload audio to S3: {exc}",
+                ) from exc
+        else:
+            print("[survey] S3 not configured — storing audio as base64 fallback.")
+
     db: Session = SessionLocal()
     try:
         survey = SurveyResponse(
@@ -342,7 +493,8 @@ def create_survey(payload: SurveyCreate):
             candidate_priority5=payload.candidatePriority5 or "",
             latitude=payload.latitude,
             longitude=payload.longitude,
-            audio_base64=payload.audio_base64,
+            audio_base64=audio_base64,
+            audio_url=audio_url,
             dynamic_answers=payload.dynamicAnswers,
         )
         db.add(survey)
@@ -353,13 +505,30 @@ def create_survey(payload: SurveyCreate):
         db.close()
 
 
-@app.get("/api/wards", response_model=List[WardOut])
-def get_wards():
-    """Get all wards from database"""
+@app.get("/api/assemblies", response_model=List[AssemblyOut])
+def get_assemblies():
+    """Get all assemblies from database."""
     db: Session = SessionLocal()
     try:
-        wards = db.query(Ward).filter(Ward.ward_name_en != None).all()
-        return wards
+        return (
+            db.query(Assembly)
+            .filter(Assembly.assembly_name_en.isnot(None))
+            .order_by(Assembly.assembly_name_en)
+            .all()
+        )
+    finally:
+        db.close()
+
+
+@app.get("/api/wards", response_model=List[WardOut])
+def get_wards(assembly_no: int | None = None):
+    """Get wards, optionally filtered by assembly_no."""
+    db: Session = SessionLocal()
+    try:
+        query = db.query(Ward).filter(Ward.ward_name_en.isnot(None))
+        if assembly_no is not None:
+            query = query.filter(Ward.assembly_no == assembly_no)
+        return query.order_by(Ward.ward_name_en).all()
     finally:
         db.close()
 
@@ -454,7 +623,7 @@ def update_ward_questions(ward_name: str, questions: List[QuestionCreate]):
             new_q = Question(
                 ward_id=ward.id,
                 text=q.text,
-                options=",".join(q.options)
+                options=q.options,
             )
             db.add(new_q)
         
