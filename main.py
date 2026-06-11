@@ -245,9 +245,58 @@ class VoterSearch(BaseModel):
     name_en: str
     epic: str | None = None
     house: str | None = None
+    name_kannada: str | None = None
+    gender: str | None = None
+    age: str | None = None
+    mobile: str | None = None
+    rel_eng: str | None = None
+    rel_kannada: str | None = None
+    rel_type: str | None = None
+    ward_code: str | None = None
+    address_en: str | None = None
+    address_local: str | None = None
+    sl: str | None = None
+    booth_no: str | None = None
+    caste: str | None = None
+    religion: str | None = None
+    education: str | None = None
 
     class Config:
         from_attributes = True
+
+
+_VOTER_SEARCH_FIELDS = (
+    "name_en",
+    "epic",
+    "house",
+    "name_kannada",
+    "gender",
+    "age",
+    "mobile",
+    "rel_eng",
+    "rel_kannada",
+    "rel_type",
+    "ward_code",
+    "address_en",
+    "address_local",
+    "sl",
+    "sl_no",
+    "booth_no",
+    "booth",
+    "caste",
+    "religion",
+    "education",
+)
+
+
+def _voter_table_columns(db: Session) -> set[str]:
+    rows = db.execute(
+        text(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND table_name = 'voters'"
+        )
+    ).scalars().all()
+    return set(rows)
 
 
 class BoothOut(BaseModel):
@@ -793,16 +842,33 @@ def update_ward_questions(ward_name: str, questions: List[QuestionCreate]):
         db.close()
 @app.get("/api/voters/search", response_model=List[VoterSearch])
 def search_voters(q: str, ward_id: int | None = None):
-    """Search voters by name or EPIC. Uses raw SQL — production voters table has no id column."""
+    """Search voters by name, EPIC, or mobile (1+ characters)."""
     query = (q or "").strip()
-    if len(query) < 2:
+    if not query:
         return []
 
     db: Session = SessionLocal()
     try:
+        available = _voter_table_columns(db)
+        select_cols = [col for col in _VOTER_SEARCH_FIELDS if col in available]
+        if "name_en" not in select_cols:
+            select_cols = ["name_en"] + [c for c in select_cols if c != "name_en"]
+
+        search_clauses = []
+        if "name_en" in available:
+            search_clauses.append("name_en ILIKE :pattern")
+        if "epic" in available:
+            search_clauses.append("epic ILIKE :pattern")
+        if "mobile" in available:
+            search_clauses.append("CAST(mobile AS TEXT) ILIKE :pattern")
+        if "name_kannada" in available:
+            search_clauses.append("name_kannada ILIKE :pattern")
+        if not search_clauses:
+            return []
+
         params: dict = {"pattern": f"%{query}%", "limit": 10}
         ward_clause = ""
-        if ward_id:
+        if ward_id and "ward_code" in available:
             ward_clause = """
                 AND ward_code IN (
                     SELECT ward_code FROM wards WHERE id = :ward_id
@@ -813,9 +879,9 @@ def search_voters(q: str, ward_id: int | None = None):
         rows = db.execute(
             text(
                 f"""
-                SELECT name_en, epic, house
+                SELECT {", ".join(select_cols)}
                 FROM voters
-                WHERE (name_en ILIKE :pattern OR epic ILIKE :pattern)
+                WHERE ({' OR '.join(search_clauses)})
                 {ward_clause}
                 LIMIT :limit
                 """
@@ -823,14 +889,38 @@ def search_voters(q: str, ward_id: int | None = None):
             params,
         ).mappings().all()
 
-        return [
-            VoterSearch(
-                name_en=str(row.get("name_en") or ""),
-                epic=row.get("epic"),
-                house=row.get("house"),
+        results: list[VoterSearch] = []
+        for row in rows:
+            payload = {key: row.get(key) for key in select_cols}
+            if payload.get("age") is not None:
+                payload["age"] = str(payload["age"])
+            if payload.get("sl_no") is not None and "sl" not in payload:
+                payload["sl"] = str(payload["sl_no"])
+            if payload.get("booth") is not None and "booth_no" not in payload:
+                payload["booth_no"] = str(payload["booth"])
+            results.append(
+                VoterSearch(
+                    name_en=str(payload.get("name_en") or ""),
+                    epic=payload.get("epic"),
+                    house=payload.get("house"),
+                    name_kannada=payload.get("name_kannada"),
+                    gender=payload.get("gender"),
+                    age=payload.get("age"),
+                    mobile=str(payload["mobile"]) if payload.get("mobile") is not None else None,
+                    rel_eng=payload.get("rel_eng"),
+                    rel_kannada=payload.get("rel_kannada"),
+                    rel_type=payload.get("rel_type"),
+                    ward_code=payload.get("ward_code"),
+                    address_en=payload.get("address_en"),
+                    address_local=payload.get("address_local"),
+                    sl=str(payload["sl"]) if payload.get("sl") is not None else None,
+                    booth_no=str(payload["booth_no"]) if payload.get("booth_no") is not None else None,
+                    caste=payload.get("caste"),
+                    religion=payload.get("religion"),
+                    education=payload.get("education"),
+                )
             )
-            for row in rows
-        ]
+        return results
     except Exception as exc:
         print(f"[voters/search] failed: {exc}")
         return []
