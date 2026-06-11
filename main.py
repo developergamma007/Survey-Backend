@@ -1,19 +1,32 @@
 import os
+import re
 from datetime import datetime, timedelta
 from typing import List
 
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, File, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, String, Text, create_engine, func, or_, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import Session, defer, relationship, sessionmaker
 
 import auth
+import form_config
 import s3_storage
 from config import DATABASE_URL
 from fix_booths import migrate as run_migration
+
+_MOBILE_DIGITS_RE = re.compile(r"^\d{10}$")
+
+
+def _normalize_mobile(value: str) -> str:
+    digits = re.sub(r"\D", "", value or "")
+    if not digits:
+        return ""
+    if not _MOBILE_DIGITS_RE.match(digits):
+        raise ValueError("Mobile number must be exactly 10 digits")
+    return digits
 
 engine = create_engine(DATABASE_URL, echo=False, future=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -117,13 +130,22 @@ class Booth(Base):
     ward = relationship("Ward")
 
 
+class SurveyFormConfigRow(Base):
+    __tablename__ = "survey_form_config"
+    __table_args__ = {"schema": "survey"}
+
+    id = Column(Integer, primary_key=True)
+    config_json = Column(Text, nullable=False)
+
+
 class Voter(Base):
+    """Maps to public.voters — production table has no numeric id column."""
+
     __tablename__ = "voters"
 
-    id = Column(Integer, primary_key=True, index=True)
+    epic = Column(Text, primary_key=True)
     ward_code = Column(Text)
     house = Column(Text)
-    epic = Column(Text, unique=True, index=True)
     name_en = Column(Text)
     name_kannada = Column(Text)
     gender = Column(Text)
@@ -164,7 +186,15 @@ class SurveyCreate(BaseModel):
     longitude: float | None = None
 
     audio_base64: str | None = None
+    audioKey: str | None = None
     dynamicAnswers: str | None = None
+
+    @field_validator("surveyorMobile", "interviewerMobile", mode="before")
+    @classmethod
+    def validate_mobile_fields(cls, value):
+        if value is None:
+            return ""
+        return _normalize_mobile(str(value))
 
 
 class QuestionCreate(BaseModel):
@@ -280,6 +310,24 @@ class AudioPlaybackOut(BaseModel):
     source: str
 
 
+class AudioUploadOut(BaseModel):
+    audioKey: str
+
+
+class FormConfigOut(BaseModel):
+    surveyorFields: dict[str, bool]
+    voterFields: dict[str, bool]
+    enableVoterSearch: bool
+    manualEntryWhenApiEmpty: bool
+
+
+class FormConfigUpdate(BaseModel):
+    surveyorFields: dict[str, bool] | None = None
+    voterFields: dict[str, bool] | None = None
+    enableVoterSearch: bool | None = None
+    manualEntryWhenApiEmpty: bool | None = None
+
+
 def init_db() -> None:
     Base.metadata.create_all(bind=engine)
 
@@ -310,9 +358,40 @@ def _ensure_audio_url_column() -> None:
         print(f"Warning: Could not ensure audio_url column: {e}")
 
 
+def _ensure_form_config_table() -> None:
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS survey.survey_form_config (
+                        id INTEGER PRIMARY KEY,
+                        config_json TEXT NOT NULL
+                    );
+                    """
+                )
+            )
+            row = conn.execute(text("SELECT id FROM survey.survey_form_config WHERE id = 1")).first()
+            if not row:
+                conn.execute(
+                    text("INSERT INTO survey.survey_form_config (id, config_json) VALUES (1, :cfg)"),
+                    {"cfg": form_config.dump_form_config_json(form_config.DEFAULT_FORM_CONFIG)},
+                )
+    except Exception as e:
+        print(f"Warning: Could not ensure survey_form_config table: {e}")
+
+
+def _load_form_config(db: Session) -> dict:
+    row = db.query(SurveyFormConfigRow).filter(SurveyFormConfigRow.id == 1).first()
+    if not row:
+        return form_config.normalize_form_config(None)
+    return form_config.parse_form_config_json(row.config_json)
+
+
 @app.on_event("startup")
 def on_startup() -> None:
     _ensure_audio_url_column()
+    _ensure_form_config_table()
     if not _db_startup_enabled():
         print("[startup] RUN_DB_MIGRATIONS=false — using existing remote schema (no local migrate/create).")
         return
@@ -438,6 +517,81 @@ def get_response_audio(
         db.close()
 
 
+@app.get("/api/survey-form-config", response_model=FormConfigOut)
+def get_survey_form_config():
+    db: Session = SessionLocal()
+    try:
+        cfg = _load_form_config(db)
+        return FormConfigOut(**cfg)
+    finally:
+        db.close()
+
+
+@app.put("/api/survey-form-config", response_model=FormConfigOut)
+def update_survey_form_config(
+    payload: FormConfigUpdate,
+    current_user: auth.User = Depends(auth.get_current_user),
+):
+    db: Session = SessionLocal()
+    try:
+        row = db.query(SurveyFormConfigRow).filter(SurveyFormConfigRow.id == 1).first()
+        current = _load_form_config(db)
+        if payload.surveyorFields is not None:
+            current["surveyorFields"].update(payload.surveyorFields)
+        if payload.voterFields is not None:
+            current["voterFields"].update(payload.voterFields)
+        if payload.enableVoterSearch is not None:
+            current["enableVoterSearch"] = payload.enableVoterSearch
+        if payload.manualEntryWhenApiEmpty is not None:
+            current["manualEntryWhenApiEmpty"] = payload.manualEntryWhenApiEmpty
+        normalized = form_config.normalize_form_config(current)
+        serialized = form_config.dump_form_config_json(normalized)
+        if row:
+            row.config_json = serialized
+        else:
+            db.add(SurveyFormConfigRow(id=1, config_json=serialized))
+        db.commit()
+        return FormConfigOut(**normalized)
+    finally:
+        db.close()
+
+
+@app.post("/api/surveys/upload-audio", response_model=AudioUploadOut)
+async def upload_survey_audio_file(
+    audio: UploadFile = File(...),
+    current_user: auth.User | None = Depends(auth.get_optional_user),
+):
+    if current_user and auth.is_submit_blocked_username(current_user.username):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin accounts cannot submit survey responses.",
+        )
+
+    content = await audio.read()
+    if len(content) < 50:
+        raise HTTPException(status_code=400, detail="Audio file is too small")
+
+    content_type = (audio.content_type or "audio/m4a").split(";")[0].strip().lower()
+    if not content_type.startswith("audio/"):
+        content_type = "audio/m4a"
+
+    if not s3_storage.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Audio upload requires S3 configuration on the server.",
+        )
+
+    try:
+        audio_key = s3_storage.upload_survey_audio_bytes(content, content_type)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to upload audio: {exc}",
+        ) from exc
+
+    return AudioUploadOut(audioKey=audio_key)
+
+
 @app.post("/surveys", response_model=SurveyOut)
 async def create_survey(
     payload: SurveyCreate,
@@ -452,7 +606,10 @@ async def create_survey(
     audio_url: str | None = None
     audio_base64: str | None = payload.audio_base64
 
-    if payload.audio_base64 and payload.audio_base64.strip():
+    if payload.audioKey and payload.audioKey.strip():
+        audio_url = payload.audioKey.strip()
+        audio_base64 = None
+    elif payload.audio_base64 and payload.audio_base64.strip():
         if s3_storage.is_configured():
             try:
                 audio_url = s3_storage.upload_survey_audio(payload.audio_base64)
@@ -635,12 +792,47 @@ def update_ward_questions(ward_name: str, questions: List[QuestionCreate]):
     finally:
         db.close()
 @app.get("/api/voters/search", response_model=List[VoterSearch])
-def search_voters(q: str):
-    """Search voters by name_en for suggestions"""
+def search_voters(q: str, ward_id: int | None = None):
+    """Search voters by name or EPIC. Uses raw SQL — production voters table has no id column."""
+    query = (q or "").strip()
+    if len(query) < 2:
+        return []
+
     db: Session = SessionLocal()
     try:
-        # Use case-insensitive partial match
-        results = db.query(Voter).filter(Voter.name_en.ilike(f"%{q}%")).limit(10).all()
-        return results
+        params: dict = {"pattern": f"%{query}%", "limit": 10}
+        ward_clause = ""
+        if ward_id:
+            ward_clause = """
+                AND ward_code IN (
+                    SELECT ward_code FROM wards WHERE id = :ward_id
+                )
+            """
+            params["ward_id"] = ward_id
+
+        rows = db.execute(
+            text(
+                f"""
+                SELECT name_en, epic, house
+                FROM voters
+                WHERE (name_en ILIKE :pattern OR epic ILIKE :pattern)
+                {ward_clause}
+                LIMIT :limit
+                """
+            ),
+            params,
+        ).mappings().all()
+
+        return [
+            VoterSearch(
+                name_en=str(row.get("name_en") or ""),
+                epic=row.get("epic"),
+                house=row.get("house"),
+            )
+            for row in rows
+        ]
+    except Exception as exc:
+        print(f"[voters/search] failed: {exc}")
+        return []
     finally:
         db.close()

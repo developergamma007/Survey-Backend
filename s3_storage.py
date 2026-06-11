@@ -7,10 +7,10 @@ import os
 import re
 import uuid
 from datetime import datetime, timezone
-from typing import Tuple
+from typing import TYPE_CHECKING, Tuple
 
-import boto3
-from botocore.exceptions import BotoCoreError, ClientError
+if TYPE_CHECKING:
+    from botocore.exceptions import BotoCoreError, ClientError
 
 _DATA_URL_RE = re.compile(r"^data:([^;]+);base64,(.+)$", re.DOTALL | re.IGNORECASE)
 
@@ -22,6 +22,18 @@ _CONTENT_TYPE_EXT = {
     "audio/ogg": "ogg",
     "audio/wav": "wav",
 }
+
+
+def _import_boto3():
+    try:
+        import boto3
+        from botocore.exceptions import BotoCoreError, ClientError
+
+        return boto3, BotoCoreError, ClientError
+    except ImportError as exc:
+        raise RuntimeError(
+            "boto3 is required for S3 audio. Run: pip install -r requirements.txt"
+        ) from exc
 
 
 def is_configured() -> bool:
@@ -37,6 +49,7 @@ def _region() -> str:
 
 
 def _client():
+    boto3, _, _ = _import_boto3()
     return boto3.client(
         "s3",
         aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
@@ -77,11 +90,37 @@ def _extension_for_content_type(content_type: str) -> str:
     return _CONTENT_TYPE_EXT.get(content_type.lower(), "webm")
 
 
+def upload_survey_audio_bytes(audio_bytes: bytes, content_type: str = "audio/m4a") -> str:
+    """Upload raw audio bytes to S3. Returns the object key."""
+    if not is_configured():
+        raise RuntimeError("S3 is not configured")
+    if len(audio_bytes) < 50:
+        raise ValueError("Audio payload is too small")
+
+    _, BotoCoreError, ClientError = _import_boto3()
+    now = datetime.now(timezone.utc)
+    ext = _extension_for_content_type(content_type)
+    object_key = f"surveys/{now:%Y/%m}/{uuid.uuid4().hex}.{ext}"
+
+    try:
+        _client().put_object(
+            Bucket=_bucket(),
+            Key=object_key,
+            Body=audio_bytes,
+            ContentType=content_type,
+        )
+    except (BotoCoreError, ClientError) as exc:
+        raise RuntimeError(f"S3 upload failed: {exc}") from exc
+
+    return object_key
+
+
 def upload_survey_audio(audio_base64: str) -> str:
     """Upload audio bytes to S3. Returns the object key."""
     if not is_configured():
         raise RuntimeError("S3 is not configured")
 
+    _, BotoCoreError, ClientError = _import_boto3()
     audio_bytes, content_type = parse_audio_base64(audio_base64)
     if len(audio_bytes) < 50:
         raise ValueError("Audio payload is too small")
