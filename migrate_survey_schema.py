@@ -32,9 +32,14 @@ CREATE TABLE IF NOT EXISTS survey.survey_users (
     id SERIAL PRIMARY KEY,
     username VARCHAR(255) NOT NULL UNIQUE,
     hashed_password TEXT NOT NULL,
+    display_name VARCHAR(255),
+    mobile VARCHAR(32),
     disabled BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE survey.survey_users ADD COLUMN IF NOT EXISTS display_name VARCHAR(255);
+ALTER TABLE survey.survey_users ADD COLUMN IF NOT EXISTS mobile VARCHAR(32);
 
 CREATE INDEX IF NOT EXISTS ix_survey_users_username ON survey.survey_users (username);
 

@@ -347,6 +347,7 @@ class SurveyListRead(BaseModel):
     longitude: float | None
     audio_url: str | None = None
     has_audio: bool = False
+    audio_link: str | None = None
     dynamic_answers: str | None
     created_at: datetime
 
@@ -407,6 +408,19 @@ def _ensure_audio_url_column() -> None:
         print(f"Warning: Could not ensure audio_url column: {e}")
 
 
+def _ensure_survey_user_profile_columns() -> None:
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text("ALTER TABLE survey.survey_users ADD COLUMN IF NOT EXISTS display_name VARCHAR(255);")
+            )
+            conn.execute(
+                text("ALTER TABLE survey.survey_users ADD COLUMN IF NOT EXISTS mobile VARCHAR(32);")
+            )
+    except Exception as e:
+        print(f"Warning: Could not ensure survey_users profile columns: {e}")
+
+
 def _ensure_form_config_table() -> None:
     try:
         with engine.begin() as conn:
@@ -440,6 +454,7 @@ def _load_form_config(db: Session) -> dict:
 @app.on_event("startup")
 def on_startup() -> None:
     _ensure_audio_url_column()
+    _ensure_survey_user_profile_columns()
     _ensure_form_config_table()
     if not _db_startup_enabled():
         print("[startup] RUN_DB_MIGRATIONS=false — using existing remote schema (no local migrate/create).")
@@ -478,11 +493,90 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
     return await _issue_access_token(form_data)
 
 
+@app.get("/api/me", response_model=auth.UserProfile)
+def read_current_user_profile(current_user: auth.User = Depends(auth.get_current_user)):
+    profile = auth.get_user_profile(current_user.username)
+    if not profile:
+        raise HTTPException(status_code=404, detail="User profile not found")
+    return profile
+
+
+class SurveyorLoginIn(BaseModel):
+    display_name: str
+    mobile: str
+
+
+@app.post("/api/surveyor/login", response_model=auth.Token)
+def surveyor_login(payload: SurveyorLoginIn):
+    if auth.is_blocked_surveyor_identity(payload.display_name, payload.mobile):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Admin credentials cannot be used for field surveyor sign-in",
+        )
+    user = auth.get_or_create_surveyor(payload.display_name, payload.mobile)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Enter a valid surveyor name and 10-digit number",
+        )
+    access_token_expires = timedelta(minutes=auth.ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = auth.create_access_token(
+        data={"sub": user.username}, expires_delta=access_token_expires
+    )
+    return {"access_token": access_token, "token_type": "bearer"}
+
+
+class SurveyUserListItem(BaseModel):
+    id: int
+    username: str
+    display_name: str
+    mobile: str
+    created_at: datetime
+    disabled: bool
+
+
+@app.get("/api/survey-users", response_model=List[SurveyUserListItem])
+def list_survey_users(current_user: auth.User = Depends(auth.require_responses_admin)):
+    db = auth.AuthSessionLocal()
+    try:
+        rows = (
+            db.query(auth.SurveyUser)
+            .order_by(auth.SurveyUser.created_at.desc())
+            .all()
+        )
+        result: List[SurveyUserListItem] = []
+        for row in rows:
+            if not auth.is_listable_surveyor_user(row.username, row.display_name, row.mobile):
+                continue
+            result.append(
+                SurveyUserListItem(
+                    id=row.id,
+                    username=row.username,
+                    display_name=auth.normalize_name(row.display_name or row.username),
+                    mobile=auth.normalize_mobile(row.mobile or ""),
+                    created_at=row.created_at,
+                    disabled=bool(row.disabled),
+                )
+            )
+        return result
+    finally:
+        db.close()
+
+
 def _survey_has_audio_expr():
     return or_(
         SurveyResponse.audio_url.isnot(None),
         func.coalesce(func.length(SurveyResponse.audio_base64), 0) > 50,
     )
+
+
+def _resolve_audio_link(survey: SurveyResponse) -> str | None:
+    if not survey.audio_url:
+        return None
+    try:
+        return s3_storage.get_playback_url(survey.audio_url)
+    except Exception:
+        return None
 
 
 def _to_survey_list_item(survey: SurveyResponse, has_audio: bool) -> SurveyListRead:
@@ -515,13 +609,14 @@ def _to_survey_list_item(survey: SurveyResponse, has_audio: bool) -> SurveyListR
         longitude=survey.longitude,
         audio_url=survey.audio_url,
         has_audio=has_audio,
+        audio_link=_resolve_audio_link(survey) if has_audio else None,
         dynamic_answers=survey.dynamic_answers,
         created_at=survey.created_at,
     )
 
 
 @app.get("/api/responses", response_model=List[SurveyListRead])
-def read_surveys(current_user: auth.User = Depends(auth.get_current_user)):
+def read_surveys(current_user: auth.User = Depends(auth.require_responses_admin)):
     db: Session = SessionLocal()
     try:
         rows = (
@@ -538,7 +633,7 @@ def read_surveys(current_user: auth.User = Depends(auth.get_current_user)):
 @app.get("/api/responses/{survey_id}/audio", response_model=AudioPlaybackOut)
 def get_response_audio(
     survey_id: int,
-    current_user: auth.User = Depends(auth.get_current_user),
+    current_user: auth.User = Depends(auth.require_responses_admin),
 ):
     db: Session = SessionLocal()
     try:
@@ -579,7 +674,7 @@ def get_survey_form_config():
 @app.put("/api/survey-form-config", response_model=FormConfigOut)
 def update_survey_form_config(
     payload: FormConfigUpdate,
-    current_user: auth.User = Depends(auth.get_current_user),
+    current_user: auth.User = Depends(auth.require_responses_admin),
 ):
     db: Session = SessionLocal()
     try:

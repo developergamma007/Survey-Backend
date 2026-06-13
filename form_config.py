@@ -6,8 +6,7 @@ import json
 from copy import deepcopy
 
 DEFAULT_FORM_CONFIG: dict = {
-    "surveyorFields": {
-        "assembly": True,
+        "surveyorFields": {
         "ward": True,
         "pollingStation": True,
         "surveyorName": True,
