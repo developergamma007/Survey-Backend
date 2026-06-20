@@ -18,13 +18,23 @@ Health check: `http://127.0.0.1:8002/health`
 
 Survey audio is uploaded separately via `POST /api/surveys/upload-audio` (multipart), then referenced in `POST /surveys` as `audioKey`. This avoids oversized JSON bodies.
 
-**nginx** defaults to `client_max_body_size 1m`, which causes **413 Payload Too Large** when audio is sent inline. Add inside your API `server` or `location` block:
+**nginx** defaults to `client_max_body_size 1m`, which causes **413 Payload Too Large** before FastAPI receives the audio. Add inside your API `server` or `location` block:
 
 ```nginx
-client_max_body_size 50m;
+client_max_body_size 25m;
+client_body_timeout 120s;
+proxy_read_timeout 120s;
+proxy_send_timeout 120s;
 ```
 
-Reload nginx after editing. Ensure S3 env vars are set in `.env` (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `S3_BUCKET_NAME`).
+Then validate and reload nginx:
+
+```bash
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+`deploy/nginx-survey-backend.conf` has a ready-to-copy location block for the production proxy. Ensure S3 env vars are set in `.env` (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `S3_BUCKET_NAME`). The app also enforces `MAX_AUDIO_UPLOAD_BYTES` (default `26214400`, 25 MB), so keep nginx at or above that value.
 
 ## Production (PM2 + nginx on port 8000)
 

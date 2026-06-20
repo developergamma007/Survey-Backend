@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session, defer, relationship, sessionmaker
 import auth
 import form_config
 import s3_storage
-from config import DATABASE_URL
+from config import DATABASE_URL, MAX_AUDIO_UPLOAD_BYTES
 from fix_booths import migrate as run_migration
 
 _MOBILE_DIGITS_RE = re.compile(r"^\d{10}$")
@@ -714,6 +714,12 @@ async def upload_survey_audio_file(
     content = await audio.read()
     if len(content) < 50:
         raise HTTPException(status_code=400, detail="Audio file is too small")
+    if len(content) > MAX_AUDIO_UPLOAD_BYTES:
+        limit_mb = MAX_AUDIO_UPLOAD_BYTES / (1024 * 1024)
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"Audio file is too large. Maximum allowed size is {limit_mb:.0f} MB.",
+        )
 
     content_type = (audio.content_type or "audio/m4a").split(";")[0].strip().lower()
     if not content_type.startswith("audio/"):
